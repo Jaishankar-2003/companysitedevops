@@ -11,7 +11,6 @@ pipeline {
     }
 
     stages {
-
         stage('Checkout') {
             steps {
                 checkout scm
@@ -42,12 +41,28 @@ pipeline {
                     withSonarQubeEnv('SonarQube-Local') {
                         sh """
                             ${scannerHome}/bin/sonar-scanner \
-                            -Dsonar.projectKey=CompanySite \
-                            -Dsonar.projectName=CompanySite \
-                            -Dsonar.sources=src \
-                            -Dsonar.exclusions=**/node_modules/**,**/.next/** \
-                            -Dsonar.sourceEncoding=UTF-8
+                                -Dsonar.projectKey=CompanySite \
+                                -Dsonar.projectName=CompanySite \
+                                -Dsonar.sources=src \
+                                -Dsonar.exclusions=**/node_modules/**,**/.next/** \
+                                -Dsonar.sourceEncoding=UTF-8
                         """
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    script {
+                        def qg = waitForQualityGate()
+
+                        echo "Quality Gate Status: ${qg.status}"
+
+                        if (qg.status != 'OK') {
+                            error "Quality Gate failed: ${qg.status}"
+                        }
                     }
                 }
             }
