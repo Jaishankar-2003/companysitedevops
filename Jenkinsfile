@@ -17,6 +17,23 @@ pipeline {
             }
         }
 
+        stage('Trivy Security Scan') {
+            steps {
+                sh '''
+                echo "Starting Trivy filesystem security scan..."
+
+                trivy fs \
+                --scanners vuln,misconfig,secret \
+                --severity HIGH,CRITICAL \
+                --exit-code 1 \
+                --skip-dirs .git \
+                --skip-dirs node_modules \
+                --skip-dirs .next \
+                .
+                '''
+            }
+        }
+
         stage('Install Dependencies') {
             steps {
                 sh '''
