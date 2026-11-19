@@ -1,4 +1,3 @@
-
 pipeline {
     agent any
 
@@ -20,16 +19,16 @@ pipeline {
         stage('Trivy Security Scan') {
             steps {
                 sh '''
-                echo "Starting Trivy filesystem security scan..."
+                    echo "Starting Trivy filesystem security scan..."
 
-                trivy fs \
-                --scanners vuln,misconfig,secret \
-                --severity HIGH,CRITICAL \
-                --exit-code 1 \
-                --skip-dirs .git \
-                --skip-dirs node_modules \
-                --skip-dirs .next \
-                .
+                    trivy fs \
+                        --scanners vuln,misconfig,secret \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 1 \
+                        --skip-dirs .git \
+                        --skip-dirs node_modules \
+                        --skip-dirs .next \
+                        .
                 '''
             }
         }
@@ -47,6 +46,29 @@ pipeline {
         stage('Next.js Production Build') {
             steps {
                 sh 'npm run build'
+            }
+        }
+
+        stage('Docker Image Build') {
+            steps {
+                sh """
+                    echo "Building CompanySite Docker image..."
+                    docker build -t companysite:${BUILD_NUMBER} .
+                    docker images companysite
+                """
+            }
+        }
+
+        stage('Trivy Docker Image Scan') {
+            steps {
+                sh """
+                    echo "Scanning Docker image for vulnerabilities and secrets..."
+                    trivy image \
+                        --scanners vuln,secret \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 1 \
+                        companysite:${BUILD_NUMBER}
+                """
             }
         }
 
