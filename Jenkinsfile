@@ -115,5 +115,47 @@ pipeline {
                 }
             }
         }
+
+        stage('Push Docker Image to Amazon ECR') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'aws-ecr-companysite',
+                    usernameVariable: 'AWS_ACCESS_KEY_ID',
+                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                )]) {
+                    sh '''
+                        set -eu
+
+                        AWS_REGION="us-east-1"
+                        ECR_REGISTRY="109389323424.dkr.ecr.us-east-1.amazonaws.com"
+                        ECR_REPOSITORY="companysite"
+                        IMAGE_TAG="build-$BUILD_NUMBER"
+
+                        echo "Authenticating with Amazon ECR..."
+
+                        aws ecr get-login-password \
+                            --region "$AWS_REGION" | \
+                            docker login \
+                            --username AWS \
+                            --password-stdin "$ECR_REGISTRY"
+
+                        echo "Tagging Docker image..."
+
+                        docker tag \
+                            "companysite:$BUILD_NUMBER" \
+                            "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+                        echo "Pushing image to ECR..."
+
+                        docker push \
+                            "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+                        echo "Successfully pushed: $IMAGE_TAG"
+
+                        docker logout "$ECR_REGISTRY"
+                    '''
+                }
+            }
+        }
     }
 }
