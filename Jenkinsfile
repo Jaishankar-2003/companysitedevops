@@ -52,8 +52,17 @@ pipeline {
         stage('Docker Image Build') {
             steps {
                 sh """
-                    echo "Building CompanySite Docker image..."
-                    docker build -t companysite:${BUILD_NUMBER} .
+                    echo "Building secured Alpine image..."
+
+                    echo "===== Dockerfile Runtime Base ====="
+                    grep -n "FROM node:" Dockerfile
+
+                    echo "===== Runtime Tool Removal ====="
+                    grep -n "npm\\|corepack\\|yarn" Dockerfile || true
+
+                    docker build --pull --no-cache \
+                        -t companysite:${BUILD_NUMBER} .
+
                     docker images companysite
                 """
             }
