@@ -8,19 +8,25 @@ pipeline {
 
     options {
         timestamps()
+        disableConcurrentBuilds()
     }
 
     stages {
+
+        // 1. CHECKOUT SOURCE CODE
         stage('Checkout') {
             steps {
                 checkout scm
             }
         }
 
+        // 2. FILESYSTEM SECURITY SCAN
         stage('Trivy Security Scan') {
             steps {
                 sh '''
-                    echo "Starting Trivy filesystem security scan..."
+                    set -eu
+
+                    echo "===== TRIVY FILESYSTEM SCAN ====="
 
                     trivy fs \
                         --scanners vuln,misconfig,secret \
@@ -34,32 +40,47 @@ pipeline {
             }
         }
 
+        // 3. INSTALL DEPENDENCIES
         stage('Install Dependencies') {
             steps {
                 sh '''
+                    set -eu
+
+                    echo "===== NODE VERSION ====="
                     node --version
                     npm --version
+
+                    echo "===== INSTALLING DEPENDENCIES ====="
                     npm ci
                 '''
             }
         }
 
+        // 4. NEXT.JS BUILD
         stage('Next.js Production Build') {
             steps {
-                sh 'npm run build'
+                sh '''
+                    set -eu
+
+                    echo "===== NEXT.JS PRODUCTION BUILD ====="
+                    npm run build
+                '''
             }
         }
 
+        // 5. DOCKER IMAGE BUILD
         stage('Docker Image Build') {
             steps {
                 sh """
-                    echo "Building secured Alpine image..."
+                    set -eu
 
-                    echo "===== Dockerfile Runtime Base ====="
+                    echo "===== DOCKERFILE RUNTIME BASE ====="
                     grep -n "FROM node:" Dockerfile
 
-                    echo "===== Runtime Tool Removal ====="
+                    echo "===== RUNTIME TOOL REMOVAL ====="
                     grep -n "npm\\|corepack\\|yarn" Dockerfile || true
+
+                    echo "===== BUILDING DOCKER IMAGE ====="
 
                     docker build --pull --no-cache \
                         -t companysite:${BUILD_NUMBER} .
@@ -69,10 +90,13 @@ pipeline {
             }
         }
 
+        // 6. DOCKER IMAGE SECURITY SCAN
         stage('Trivy Docker Image Scan') {
             steps {
                 sh """
-                    echo "Scanning Docker image for vulnerabilities and secrets..."
+                    set -eu
+
+                    echo "===== TRIVY IMAGE SCAN ====="
 
                     trivy image \
                         --scanners vuln,secret \
@@ -83,6 +107,7 @@ pipeline {
             }
         }
 
+        // 7. SONARQUBE CODE ANALYSIS
         stage('SonarQube Code Analysis') {
             steps {
                 script {
@@ -90,6 +115,10 @@ pipeline {
 
                     withSonarQubeEnv('SonarQube-Local') {
                         sh """
+                            set -eu
+
+                            echo "===== SONARQUBE ANALYSIS ====="
+
                             ${scannerHome}/bin/sonar-scanner \
                                 -Dsonar.projectKey=CompanySite \
                                 -Dsonar.projectName=CompanySite \
@@ -102,6 +131,7 @@ pipeline {
             }
         }
 
+        // 8. SONARQUBE QUALITY GATE
         stage('Quality Gate') {
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
@@ -118,13 +148,16 @@ pipeline {
             }
         }
 
+        // 9. PUSH IMAGE TO AMAZON ECR
         stage('Push Docker Image to Amazon ECR') {
             steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'aws-ecr-companysite',
-                    usernameVariable: 'AWS_ACCESS_KEY_ID',
-                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
-                )]) {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-ecr-companysite',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
                     sh '''
                         set -eu
 
@@ -133,26 +166,26 @@ pipeline {
                         ECR_REPOSITORY="companysite"
                         IMAGE_TAG="build-$BUILD_NUMBER"
 
-                        echo "Authenticating with Amazon ECR..."
+                        echo "===== ECR AUTHENTICATION ====="
 
                         aws ecr get-login-password \
                             --region "$AWS_REGION" | \
                             docker login \
-                            --username AWS \
-                            --password-stdin "$ECR_REGISTRY"
+                                --username AWS \
+                                --password-stdin "$ECR_REGISTRY"
 
-                        echo "Tagging Docker image..."
+                        echo "===== TAGGING IMAGE ====="
 
                         docker tag \
                             "companysite:$BUILD_NUMBER" \
                             "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-                        echo "Pushing image to ECR..."
+                        echo "===== PUSHING IMAGE TO ECR ====="
 
                         docker push \
                             "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-                        echo "Successfully pushed: $IMAGE_TAG"
+                        echo "ECR_PUSH_SUCCESSFUL: $IMAGE_TAG"
 
                         docker logout "$ECR_REGISTRY"
                     '''
@@ -160,6 +193,7 @@ pipeline {
             }
         }
 
+        // 10. DYNAMIC BLUE-GREEN DEPLOYMENT
         stage('Deploy to EC2 - Blue Green') {
             steps {
                 withCredentials([
@@ -175,64 +209,61 @@ pipeline {
                         EC2_HOST="98.91.240.191"
                         IMAGE_TAG="build-$BUILD_NUMBER"
 
+                        echo "======================================"
+                        echo "       BLUE-GREEN DEPLOYMENT"
+                        echo "======================================"
+
+                        echo "Image: $IMAGE_TAG"
+                        echo "EC2: $EC2_HOST"
+
                         echo "===== CONNECTING TO EC2 ====="
 
                         ssh -i "$SSH_KEY" \
                             -o BatchMode=yes \
+                            -o IdentitiesOnly=yes \
                             -o StrictHostKeyChecking=yes \
+                            -o ConnectTimeout=15 \
+                            -o ServerAliveInterval=30 \
                             "$SSH_USER@$EC2_HOST" \
-                            "IMAGE_TAG='$IMAGE_TAG' bash -s" <<'REMOTE'
-                        set -eu
+                            "sudo -n /opt/companysite/deploy/bluegreen-deploy.sh '$IMAGE_TAG'"
 
-                        DEPLOY_DIR="/opt/companysite/deploy"
-                        CONFIG="$DEPLOY_DIR/deployment.env"
-
-                        source "$CONFIG"
-
-                        echo "===== CHECKING ACTIVE PRODUCTION PORT ====="
-
-                        ACTIVE_PORT=$(sudo grep -oE 'proxy_pass http://127\\.0\\.0\\.1:[0-9]+' \
-                            /etc/nginx/conf.d/companysite.conf \
-                            | grep -oE '[0-9]+$')
-
-                        echo "Current production port: $ACTIVE_PORT"
-
-                        if [ "$ACTIVE_PORT" = "$CANDIDATE_PORT" ]; then
-                            echo "ERROR: Candidate port is currently serving production."
-                            echo "The existing fixed-slot deploy.sh cannot safely replace it."
-                            exit 1
-                        fi
-
-                        if [ "$ACTIVE_PORT" != "$PRODUCTION_PORT" ]; then
-                            echo "ERROR: Unexpected Nginx production port."
-                            exit 1
-                        fi
-
-                        echo "===== REMOVING OLD STANDBY CONTAINER ====="
-
-                        if sudo docker container inspect "$CANDIDATE_CONTAINER" >/dev/null 2>&1; then
-                            sudo docker rm -f "$CANDIDATE_CONTAINER"
-                        fi
-
-                        echo "===== DEPLOYING NEW IMAGE ====="
-
-                        sudo "$DEPLOY_DIR/deploy.sh" "$IMAGE_TAG"
-
-                        echo "===== SWITCHING TRAFFIC ====="
-
-                        sudo "$DEPLOY_DIR/switch-traffic.sh" "$CANDIDATE_PORT"
-
-                        echo "===== VERIFYING PRODUCTION ====="
-
-                        sudo curl --fail --silent --show-error \
-                            http://127.0.0.1/ \
-                            -o /dev/null
-
-                        echo "BLUE_GREEN_DEPLOYMENT_SUCCESSFUL"
-                        REMOTE
+                        echo "===== BLUE-GREEN DEPLOYMENT COMPLETED ====="
                     '''
                 }
             }
+        }
+    }
+
+    post {
+        success {
+            echo '''
+            ======================================
+                  CI/CD PIPELINE SUCCESS
+            ======================================
+            Security scan: PASSED
+            Next.js build: PASSED
+            Docker build: PASSED
+            SonarQube: PASSED
+            ECR push: PASSED
+            Blue-Green deployment: PASSED
+            ======================================
+            '''
+        }
+
+        failure {
+            echo '''
+            ======================================
+                  CI/CD PIPELINE FAILED
+            ======================================
+            Check the failed stage in Jenkins.
+            Production traffic is not assumed to
+            have changed if deployment failed.
+            ======================================
+            '''
+        }
+
+        always {
+            echo "Pipeline execution completed."
         }
     }
 }
