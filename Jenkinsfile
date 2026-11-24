@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -72,6 +73,7 @@ pipeline {
             steps {
                 sh """
                     echo "Scanning Docker image for vulnerabilities and secrets..."
+
                     trivy image \
                         --scanners vuln,secret \
                         --severity HIGH,CRITICAL \
@@ -153,6 +155,81 @@ pipeline {
                         echo "Successfully pushed: $IMAGE_TAG"
 
                         docker logout "$ECR_REGISTRY"
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to EC2 - Blue Green') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'companysite-ec2-ssh',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+
+                        EC2_HOST="98.91.240.191"
+                        IMAGE_TAG="build-$BUILD_NUMBER"
+
+                        echo "===== CONNECTING TO EC2 ====="
+
+                        ssh -i "$SSH_KEY" \
+                            -o BatchMode=yes \
+                            -o StrictHostKeyChecking=yes \
+                            "$SSH_USER@$EC2_HOST" \
+                            "IMAGE_TAG='$IMAGE_TAG' bash -s" <<'REMOTE'
+                        set -eu
+
+                        DEPLOY_DIR="/opt/companysite/deploy"
+                        CONFIG="$DEPLOY_DIR/deployment.env"
+
+                        source "$CONFIG"
+
+                        echo "===== CHECKING ACTIVE PRODUCTION PORT ====="
+
+                        ACTIVE_PORT=$(sudo grep -oE 'proxy_pass http://127\\.0\\.0\\.1:[0-9]+' \
+                            /etc/nginx/conf.d/companysite.conf \
+                            | grep -oE '[0-9]+$')
+
+                        echo "Current production port: $ACTIVE_PORT"
+
+                        if [ "$ACTIVE_PORT" = "$CANDIDATE_PORT" ]; then
+                            echo "ERROR: Candidate port is currently serving production."
+                            echo "The existing fixed-slot deploy.sh cannot safely replace it."
+                            exit 1
+                        fi
+
+                        if [ "$ACTIVE_PORT" != "$PRODUCTION_PORT" ]; then
+                            echo "ERROR: Unexpected Nginx production port."
+                            exit 1
+                        fi
+
+                        echo "===== REMOVING OLD STANDBY CONTAINER ====="
+
+                        if sudo docker container inspect "$CANDIDATE_CONTAINER" >/dev/null 2>&1; then
+                            sudo docker rm -f "$CANDIDATE_CONTAINER"
+                        fi
+
+                        echo "===== DEPLOYING NEW IMAGE ====="
+
+                        sudo "$DEPLOY_DIR/deploy.sh" "$IMAGE_TAG"
+
+                        echo "===== SWITCHING TRAFFIC ====="
+
+                        sudo "$DEPLOY_DIR/switch-traffic.sh" "$CANDIDATE_PORT"
+
+                        echo "===== VERIFYING PRODUCTION ====="
+
+                        sudo curl --fail --silent --show-error \
+                            http://127.0.0.1/ \
+                            -o /dev/null
+
+                        echo "BLUE_GREEN_DEPLOYMENT_SUCCESSFUL"
+                        REMOTE
                     '''
                 }
             }
